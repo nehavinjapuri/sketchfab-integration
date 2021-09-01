@@ -1,4 +1,4 @@
-# sketchfab-integration
+# Sketchfab-Integration
 Using OAuth2 to authorize the use of Sketchfab for third party users and load 3D models into Unity in runtime.
 
 C# script made in Unity.
