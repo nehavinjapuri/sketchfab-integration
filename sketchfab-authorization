@@ -1,0 +1,547 @@
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+using UnityEngine.Networking;
+using SimpleJSON;
+using TMPro;
+using UnityEngine.UI;
+using TriLibCore;
+using TriLibCore.SFB;
+using System.Net;
+using System;
+using System.IO;
+using System.Collections.Specialized;
+using System.Text;
+using TriLibCore.General;
+using TriLibCore.Mappers;
+
+public class SketchfabLoginHandler : MonoBehaviour
+{
+    public AssetLoaderOptions customAssetLoader;
+    //Thumbnail Image
+    [SerializeField]
+    private RawImage thumbnailRawImage;
+
+    //UI Elements
+    [SerializeField]
+    private GameObject loginButton, thumbnailImageObject, inputObject, enterButton;
+
+    //Base URLS
+    private readonly string baseUrl = "https://sketchfab.com/v3/";
+    private readonly string altBaseUrl = "https://api.sketchfab.com/v3/models/";
+
+    //API Key Version
+    private readonly string apiKey = "INSERT_YOUR_API_KEY";
+
+    //OAuth Version
+    private readonly string clientID = "INSERT_YOUR_CLIENT_ID";
+    private readonly string clientSecret = "INSERT_YOUR_CLIENT_SECRET";
+    private string redirect_uri;
+    private HttpListener listener;
+    private string state, codeVerifier, codeChallenge, authorization_code;
+    private string modelUri;
+    private string authToken;
+
+    //State
+    private bool callSigninAPI = false;
+    private bool receivedSketchfabAuth = false;
+    private bool completelyAuthorized = false;
+
+    //Coroutines
+    private Coroutine listnerCoroutine, stopServerCoroutine, authCoroutine;
+
+    
+    // Start is called before the first frame update
+    void Start()
+    {
+        thumbnailRawImage.texture = Texture2D.blackTexture;
+        loginButton.SetActive(true);
+        thumbnailImageObject.SetActive(false);
+        inputObject.SetActive(false);
+        enterButton.SetActive(false);
+
+
+    }
+
+    void OnEnable()
+    {
+        onUrlCreate+=DownloadModel;
+    }
+
+    void OnDisable()
+    {
+        onUrlCreate-=DownloadModel;
+    }
+
+    void Update()
+    {
+    	if (receivedSketchfabAuth == true)
+    	{
+    		StartCoroutine(GetAuthToken());
+    		receivedSketchfabAuth = false;
+    	}
+
+    	if (completelyAuthorized == true)
+    	{
+    		loginButton.SetActive(false);
+    		thumbnailImageObject.SetActive(true);
+        	inputObject.SetActive(true);
+        	enterButton.SetActive(true);
+        	completelyAuthorized = false;
+
+    	}
+
+        if (progressChecker == 100)
+        {
+            ShaderAssigner2();
+            progressChecker = 101;
+        }
+
+    }
+
+	public void LoginButton()
+	{
+		thumbnailRawImage.texture = Texture2D.blackTexture;
+		OAuthSketchfabLogin();
+		//StartCoroutine(GetLikedModels());
+	}
+
+	public void OAuthSketchfabLogin()
+	{
+		receivedSketchfabAuth = false;
+		string oAuthCallURL = "https://sketchfab.com/oauth2/authorize/?state=123456789&response_type=token&client_id=" + clientID;
+		string oAuthNewCallURL = "https://sketchfab.com/oauth2/authorize/?response_type=code&client_id="+clientID+"&redirect_uri=http://localhost:7777&approval_prompt=auto";
+		redirect_uri = "http://localhost:7777/";
+
+		Application.OpenURL(oAuthNewCallURL);
+		Debug.Log(oAuthCallURL);
+		Debug.Log(redirect_uri);
+		stopServerCoroutine = StartCoroutine(StopServer());
+        listnerCoroutine = StartCoroutine(StartListening());
+        
+	}
+
+	//will time out after given time
+    IEnumerator StopServer()
+    {
+        yield return new WaitForSeconds(5.0f * 60.0f);
+        if (listener.IsListening)
+        {
+            listener.Stop();
+        }
+    }
+
+    //setting up what the listener should listen to
+    private IEnumerator StartListening()
+    {
+    	Debug.Log("StartListening Reached!");
+        listener = new HttpListener();
+        listener.Prefixes.Add(redirect_uri);
+        listener.Start();
+        var result = listener.BeginGetContext(ListenerCallback, listener);
+        while (!receivedSketchfabAuth && listener.IsListening)
+        {
+            yield return null;
+        }
+        listener.Stop();
+    }
+
+   
+    public void ListenerCallback(IAsyncResult result)
+    {
+    	Debug.Log("ListenerCallback Reached!");
+        HttpListenerContext context = listener.EndGetContext(result);
+        var response = context.Response;
+        string responseString = "<html><head><meta http-equiv='refresh' content='10;url=https://google.com'></head><body>\tAuthentication details received, processing details. You may close this window at any time. Browse Sketchfab to find models, and paste a model's URL back in the Creator Studio if you would like to use it!</body></html>";
+        Debug.Log(responseString);
+        byte[] buffer = Encoding.UTF8.GetBytes(responseString);
+        response.ContentLength64 = buffer.Length;
+        var responseOutput = response.OutputStream;
+        responseOutput.Write(buffer, 0, buffer.Length);
+        responseOutput.Close();
+
+        ParseResponse(context);
+        listener.Stop();
+    }
+
+    private void ParseResponse(HttpListenerContext context)
+    {
+        var body = new StreamReader(context.Request.InputStream).ReadToEnd();
+        Debug.Log(body);
+        authorization_code = context.Request.QueryString.Get("code");
+        if (string.IsNullOrEmpty(authorization_code))
+        {
+            Debug.LogError("Unable to process request");
+            return;
+        }
+
+        else
+        {
+            receivedSketchfabAuth = true;
+            callSigninAPI = true;
+            listener.Stop();
+            Debug.Log(authorization_code);
+        }
+        
+    }
+
+    
+    IEnumerator GetAuthToken()
+    {
+    	string authTokenURL = "https://sketchfab.com/oauth2/token/";
+
+        WWWForm form = new WWWForm();
+        form.AddField("grant_type", "authorization_code");
+        form.AddField("code", authorization_code);
+		    form.AddField("client_id", clientID);
+        form.AddField("client_secret", clientSecret);
+        form.AddField("redirect_uri", "http://localhost:7777");
+        UnityWebRequest authTokenRequest = UnityWebRequest.Post(authTokenURL,form);
+        yield return authTokenRequest.SendWebRequest();
+        if (authTokenRequest.isNetworkError || authTokenRequest.isHttpError)
+        {
+            Debug.Log(authTokenRequest.error);
+        }
+        else
+        {
+            Debug.Log("Auth received!");
+            
+        }
+
+        JSONNode authTokenInfo = JSON.Parse(authTokenRequest.downloadHandler.text);
+		
+		//Second
+		authToken = authTokenInfo["access_token"];
+		Debug.Log(authToken);
+		completelyAuthorized = true;
+
+    }
+
+    
+
+    //On Enter Click
+    private string urlName;
+    private string finalURL;
+
+    public void ReadURLInput()
+    {	
+    	urlName = inputObject.GetComponent<TMP_InputField>().text;
+    	Debug.Log(urlName);
+    	string saveString = urlName;
+    	int lastIndex = saveString.LastIndexOf("-");
+    	modelUri = saveString.Substring(lastIndex + 1,saveString.Length-(lastIndex+1));
+    	Debug.Log(modelUri);
+    	finalURL = altBaseUrl + modelUri;
+    	Debug.Log(finalURL);
+    	StartCoroutine(GetTypedModelInfo());
+
+    }
+
+    System.Action<string> onUrlCreate;
+    IEnumerator GetTypedModelInfo()
+    {
+
+        //First
+		UnityWebRequest likedModelsRequest = UnityWebRequest.Get(finalURL);
+		likedModelsRequest.SetRequestHeader("Authorization","Bearer " + authToken);
+
+		yield return likedModelsRequest.SendWebRequest();
+
+		if (likedModelsRequest.isNetworkError || likedModelsRequest.isHttpError)
+		{
+			Debug.LogError(likedModelsRequest.error);
+			yield break;
+
+		}
+
+		JSONNode likedModelInfo = JSON.Parse(likedModelsRequest.downloadHandler.text);
+
+		//Second
+		string thumbnailURL = likedModelInfo["thumbnails"]["images"][0]["url"];
+		//add checker to see if it is downloadable
+		string modelDownloadURL = finalURL + "/download";
+		Debug.Log(modelDownloadURL);
+
+		
+		UnityWebRequest thumbnailSpriteRequest = UnityWebRequestTexture.GetTexture(thumbnailURL);
+		thumbnailSpriteRequest.SetRequestHeader("Authorization","Bearer " + authToken);
+		yield return thumbnailSpriteRequest.SendWebRequest();
+
+		if (thumbnailSpriteRequest.isNetworkError || thumbnailSpriteRequest.isHttpError)
+		{
+			Debug.LogError(thumbnailSpriteRequest.error);
+			yield break;
+		}
+
+		thumbnailRawImage.texture = DownloadHandlerTexture.GetContent(thumbnailSpriteRequest);
+		thumbnailRawImage.texture.filterMode = FilterMode.Point;
+		SizeToParent(thumbnailRawImage,0);
+
+
+		//Third
+		UnityWebRequest modelDownloadInfoRequest = UnityWebRequest.Get(modelDownloadURL);
+		modelDownloadInfoRequest.SetRequestHeader("Authorization","Bearer " + authToken);
+
+        if (likedModelInfo["isDownloadable"])
+        {
+    		yield return modelDownloadInfoRequest.SendWebRequest();
+
+    		if (modelDownloadInfoRequest.isNetworkError || modelDownloadInfoRequest.isHttpError)
+    		{
+    			Debug.LogError(modelDownloadInfoRequest.error);
+    			yield break;
+
+    		}
+
+    		JSONNode modelDownloadInfo = JSON.Parse(modelDownloadInfoRequest.downloadHandler.text);
+    		string gltfUrl = modelDownloadInfo["gltf"]["url"];
+
+    		//UnityWebRequest gltfDownload = UnityWebRequest.Get(gltfUrl);
+            //var newModel=AssetDownloader.LoadModelFromUri(  );
+            onUrlCreate?.Invoke(gltfUrl);
+            
+
+    		Debug.Log("Test"+gltfUrl);
+   
+
+            
+        }
+
+        else
+        {
+            Debug.Log("Model is not downloadable. Please choose another model.");
+        }
+		
+    }
+    GameObject loadedModel;
+    Material[] myMaterials;
+    Shader customShader;
+    Renderer rend;
+    private void DownloadModel(string url)
+
+    {
+        Debug.Log("Started to download");        
+        UnityWebRequest uwr = UnityWebRequest.Get(url);
+        var model = AssetDownloader.LoadModelFromUri(uwr, uwrLoad, uwrMatLoad, uwrProgress, uwrError);
+
+
+    }    
+
+    private static int progressChecker;
+    private static void uwrError(IContextualizedError obj)
+    {
+        Debug.Log("Error: " + obj.ToString());
+    }
+    private static void uwrProgress(AssetLoaderContext arg1, float arg2)
+    {
+        Debug.Log("Progress: " + (int)(arg2*100));
+        progressChecker = (int)(arg2*100);
+        
+        
+    }
+
+    private void ShaderAssigner()
+    {
+        loadedModel = (GameObject.Find("1")).transform.GetChild(0).gameObject;
+        GameObject  loadedModel2 = loadedModel.transform.GetChild(0).gameObject;
+        GameObject  loadedModel3 = loadedModel2.transform.GetChild(0).gameObject;
+        GameObject  loadedModel4 = loadedModel3.transform.GetChild(0).gameObject;
+        rend = loadedModel4.GetComponent<MeshRenderer>();
+        myMaterials = rend.materials;
+        customShader = Shader.Find("Standard");
+        if (customShader == null)
+        {
+            Debug.Log("shader is null");
+        }
+        Debug.Log("hi");
+        foreach (Material mat in myMaterials)
+        {
+            if (mat.shader.name == "Missing (Shader)")
+            {
+                Debug.Log("use this");
+            }
+            Debug.Log("materials reached");
+            mat.shader = customShader;
+            Debug.Log("applied");
+            
+        }
+    }
+
+    private void ShaderAssigner2()
+    {
+        MeshRenderer[] allMeshRenderers = (MeshRenderer[]) GameObject.FindObjectsOfType (typeof(MeshRenderer));
+        customShader = Shader.Find("Standard");
+        foreach (MeshRenderer rend in allMeshRenderers)
+        {
+            myMaterials = rend.materials;
+            foreach (Material mat in myMaterials)
+        {
+            if (mat.shader.name == "Missing (Shader)")
+            {
+                Debug.Log("use this");
+            }
+            Debug.Log("materials reached");
+            mat.shader = customShader;
+            Debug.Log("applied");
+            
+        }
+            
+        }
+
+    }
+    
+    private static void uwrMatLoad(AssetLoaderContext obj)
+    {
+        Debug.Log("Mat Loaded");
+    }
+    private static void uwrLoad(AssetLoaderContext obj)
+    {
+        Debug.Log("Model Loaded: " + obj.RootGameObject.name);
+    }
+
+
+
+
+	//allows texture's aspect ratio to remain the same
+	public Vector2 SizeToParent(RawImage image, float padding) {
+        float w = 0, h = 0;
+        var parent = image.GetComponentInParent<RectTransform>();
+        var imageTransform = image.GetComponent<RectTransform>();
+
+        // check if there is something to do
+        if (image.texture != null) {
+            if (!parent) { return imageTransform.sizeDelta; } //if we don't have a parent, just return our current width;
+            padding = 1 - padding;
+            float ratio = image.texture.width / (float)image.texture.height;
+            var bounds = new Rect(0, 0, parent.rect.width, parent.rect.height);
+            if (Mathf.RoundToInt(imageTransform.eulerAngles.z) % 180 == 90) {
+                //Invert the bounds if the image is rotated
+                bounds.size = new Vector2(bounds.height, bounds.width);
+            }
+            //Size by height first
+            h = bounds.height * padding;
+            w = h * ratio;
+            if (w > bounds.width * padding) { //If it doesn't fit, fallback to width;
+                w = bounds.width * padding;
+                h = w / ratio;
+            }
+        }
+        imageTransform.SetSizeWithCurrentAnchors(RectTransform.Axis.Horizontal, w);
+        imageTransform.SetSizeWithCurrentAnchors(RectTransform.Axis.Vertical, h);
+        return imageTransform.sizeDelta;
+    }
+
+
+
+
+
+
+
+	//----------------------------------------------------------------------------------------------------------
+    /// <summary>
+    /// Called when any error occurs.
+    /// </summary>
+    /// <param name="obj">The contextualized error, containing the original exception and the context passed to the method where the error was thrown.</param>
+    private void OnError(IContextualizedError obj)
+    {
+        Debug.LogError($"An error occurred while loading your Model: {obj.GetInnerException()}");
+    }
+
+    /// <summary>
+    /// Called when the Model loading progress changes.
+    /// </summary>
+    /// <param name="assetLoaderContext">The context used to load the Model.</param>
+    /// <param name="progress">The loading progress.</param>
+    private void OnProgress(AssetLoaderContext assetLoaderContext, float progress)
+    {
+        Debug.Log($"Loading Model. Progress: {progress:P}");
+    }
+
+    /// <summary>
+    /// Called when the Model (including Textures and Materials) has been fully loaded, or after any error occurs.
+    /// </summary>
+    /// <remarks>The loaded GameObject is available on the assetLoaderContext.RootGameObject field.</remarks>
+    /// <param name="assetLoaderContext">The context used to load the Model.</param>
+    private void OnMaterialsLoad(AssetLoaderContext assetLoaderContext)
+    {
+        Debug.Log("Materials loaded. Model fully loaded.");
+    }
+
+    /// <summary>
+    /// Called when the Model Meshes and hierarchy are loaded.
+    /// </summary>
+    /// <remarks>The loaded GameObject is available on the assetLoaderContext.RootGameObject field.</remarks>
+    /// <param name="assetLoaderContext">The context used to load the Model.</param>
+    private void OnLoad(AssetLoaderContext assetLoaderContext)
+    {
+        Debug.Log("Model loaded. Loading materials.");
+    }
+
+    /*private GameObject LoadModel(byte[] data, string filename) {
+    GameObject myGameObject;
+    try {
+        using (var assetLoader = new AssetLoader()) {
+            //In case you don't have a valid filename, set this to the file extension
+            //to help TriLib assigning a file loader to this file
+            //example value: ".FBX"
+            //var filename = "c:/models/mymodel.fbx";
+            //var fileData = File.ReadAllBytes(filename);
+            gameObject = assetLoader.LoadFromMemory(data, filename);
+            return gameObject;
+        }
+    } catch (Exception e) {
+        Debug.LogFormat("Unable to load mymodel.fbx. The loader returned: {0}", e);
+    }
+    return null;
+}*/
+    /*
+
+    private static void OnProgresss(AssetLoaderContext arg1, float progressPercentage)
+    {
+        Debug.Log("Progress: " + progressPercentage);
+    }
+    private static void OnErrors(IContextualizedError error)
+    {
+        Debug.Log("Error: " + error.ToString());
+    }
+    private static void OnMaterialLoad(AssetLoaderContext obj)
+    {
+        Debug.Log("Material Loaded");
+    }
+    private static void OnLoads(AssetLoaderContext obj)
+    {
+        Debug.Log("Load Complete");
+    }
+    */
+
+    //Extra
+
+            /*yield return gltfDownload.SendWebRequest();
+            if (gltfDownload.isNetworkError || gltfDownload.isHttpError)
+            {
+                Debug.LogError(gltfDownload.error);
+                yield break;
+
+            } 
+            else {
+                Debug.Log("downloaded");
+            }       
+            byte[] downloadedModelData = gltfDownload.downloadHandler.data;
+            MemoryStream stream = new MemoryStream(downloadedModelData);*/
+
+            /*var model = AssetLoader.LoadModelFromStream(stream, null, null, OnLoads, OnMaterialLoad, OnProgresss, OnErrors, null, customAssetLoader, null);
+
+            //var model = AssetLoader.LoadModelFromStream(downloadedModelData, ".gltf");
+            if (model!=null)
+            {
+                Debug.Log("Model loaded successfully.");
+            }
+            else
+            {                   Debug.Log("Not loaded.");
+            }
+            */
+    
+
+}
+
+
